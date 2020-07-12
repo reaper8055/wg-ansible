@@ -1,2 +1,2 @@
 # wg-ansible
-Ansible script to setup wireguard
+Ansible playbook to setup wireguard
