@@ -1,0 +1,139 @@
+---
+- hosts: all
+  become: true
+  vars_files:
+    - vars/default.yml
+
+  tasks:
+  - name: update and upgrade  
+    apt: update_cache=yes state=latest upgrade=yes
+  
+  - name: reboot after upgrade / update
+    reboot:
+      test_command: uptime
+
+  - name: Add WireGuard PPA and update cache
+    apt_repository:
+      repo: ppa:wireguard/wireguard
+    
+  - name: install pkgs
+    apt:
+      pkg:
+        - wireguard-dkms
+        - wireguard-tools
+        - linux-headers-{{ ansible_kernel }}
+        - openresolv
+        - qrencode
+  
+  - name: setting umask
+    shell:
+      cmd: umask 077
+
+  - name: create wg directory
+    file:
+      path: '{{ item.key }}'
+      state: '{{ item.value }}'
+    with_dict: '{{ wg_keys_dir }}'
+
+  - name: create wg.public and wg.private keys for server
+    shell: 
+      cmd: wg genkey | tee wg-server/privatekey | wg pubkey > wg-server/publickey
+
+  - name: create wg.public and wg.private keys for client
+    shell: 
+      cmd: wg genkey | tee wg-client/client-privatekey | wg pubkey > wg-client/client-publickey
+
+  - name: ufw allow 22/tcp
+    ufw:
+      rule: allow
+      port: '22'
+      proto: tcp 
+  
+  - name: ufw allow 51820/udp
+    ufw:
+      rule: allow
+      port: '51820'
+      proto: udp
+      state: enabled
+  
+  - name: creating wg.conf file
+    file:
+      path: /etc/sysctl.d/wg.conf
+      state: touch
+  
+  - name: Setting up DNS packet forwarding
+    sysctl:
+      sysctl_file: /etc/sysctl.d/wg.conf
+      key: '{{ item.key }}'
+      value: '{{ item.value }}'
+    with_dict: '{{ sysctl_config }}'
+  
+  - name: reload sysctl
+    shell:
+      cmd: sysctl --system
+
+  - name: creating wg0.conf file
+    blockinfile:
+      path: /etc/wireguard/wg0.conf
+      create: yes
+      state: present
+      block: |
+        [Interface]
+        Address = 10.120.120.1/24
+        SaveConfig = true
+        PostUp = iptables -A FORWARD -i %i -j ACCEPT; iptables -A FORWARD -o %i -j ACCEPT; iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE
+        PostDown = iptables -D FORWARD -i %i -j ACCEPT; iptables -D FORWARD -o %i -j ACCEPT; iptables -t nat -D POSTROUTING -o eth0 -j MASQUERADE
+        ListenPort = 51820
+        [Peer]
+        AllowedIPs = 10.120.120.2/32
+
+  - name: fetch wg-server private key
+    slurp:
+      src: wg-server/privatekey
+    register: privatekeyserver
+  
+  - name: fetch wg-server public key
+    slurp:
+      src: wg-server/publickey
+    register: publickeyserver
+  
+  - name: fetch wg-client private key
+    slurp:
+      src: wg-client/client-privatekey
+    register: privatekeyclient
+  
+  - name: fetch wg-client public key
+    slurp:
+      src: wg-client/client-publickey
+    register: publickeyclient
+  
+  - name: adding the server key
+    lineinfile:
+      path: /etc/wireguard/wg0.conf
+      insertafter: '^ListenPort'
+      line: "PrivateKey = {{ privatekeyserver['content'] | b64decode }}"
+  
+  - name: adding the client key
+    lineinfile:
+      path: /etc/wireguard/wg0.conf
+      insertbefore: '^AllowedIPs'
+      line: "PublicKey = {{ publickeyclient['content'] | b64decode }}"
+
+  - name: adding client interface
+    blockinfile:
+      path: wg-client/wg-client.conf
+      create: yes
+      state: present
+      block: |
+        [Interface]
+        PrivateKey = {{ privatekeyclient['content'] | b64decode }}
+        Address = 10.120.120.2/24
+        DNS = 1.1.1.1
+        [Peer]
+        PublicKey = {{ publickeyserver['content'] | b64decode }}
+        Endpoint = 68.183.209.43:51820
+        AllowedIPs = 0.0.0.0/0
+  
+  - name: generate qr-code for client config
+    shell: 
+      cmd: qrencode -t ansiutf8 < wg-client/wg-client.conf

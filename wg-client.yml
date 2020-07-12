@@ -1,0 +1,7 @@
+[Interface]
+Address = 10.120.120.2/24
+
+[Peer]
+PublicKey = 8uznQXGPT2a9oExPXWNU3CDpoFWEouCwGAIsNdgd8mg=
+Endpoint = 68.183.209.43:51820
+AllowedIPs = 0.0.0.0/0
